@@ -23,7 +23,7 @@ input {
 }
 
 .app-shell {
-  width: min(920px, calc(100% - 32px));
+  width: min(1040px, calc(100% - 32px));
   margin: 0 auto;
   padding: 48px 0 72px;
 }
@@ -106,11 +106,24 @@ h1 {
 
 .status {
   min-height: 24px;
-  margin: 8px 0 18px;
+  margin: 8px 0 24px;
   text-align: center;
 }
 
 .results {
+  display: block;
+}
+
+.result-section {
+  margin-bottom: 34px;
+}
+
+.section-title {
+  margin: 0 0 14px;
+  font-size: 1.3rem;
+}
+
+.result-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
@@ -121,10 +134,20 @@ h1 {
   border: 1px solid #252b36;
   border-radius: 18px;
   background: rgba(24, 28, 36, 0.94);
+  overflow: hidden;
+}
+
+.result-image {
+  width: 100%;
+  height: 180px;
+  margin-bottom: 14px;
+  object-fit: cover;
+  border-radius: 12px;
+  background: #11141a;
 }
 
 .result-card h2 {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 1.25rem;
 }
 
@@ -132,6 +155,11 @@ h1 {
   margin: 0 0 12px;
   color: #b7bdca;
   line-height: 1.55;
+}
+
+.result-subtitle {
+  color: #e1e5ed !important;
+  font-weight: 600;
 }
 
 .result-type {
@@ -144,8 +172,21 @@ h1 {
   font-size: 0.82rem;
 }
 
+.source-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #9da6ff;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.source-link:hover,
+.source-link:focus-visible {
+  text-decoration: underline;
+}
+
 .empty-state {
-  grid-column: 1 / -1;
   padding: 26px;
   border: 1px dashed #303746;
   border-radius: 18px;
@@ -167,7 +208,7 @@ h1 {
 
 @media (max-width: 680px) {
   .app-shell {
-    width: min(100% - 20px, 920px);
+    width: min(100% - 20px, 1040px);
     padding-top: 18px;
   }
 
@@ -183,7 +224,11 @@ h1 {
     min-height: 50px;
   }
 
-  .results {
+  .result-grid {
     grid-template-columns: 1fr;
+  }
+
+  .result-image {
+    height: 210px;
   }
 }
