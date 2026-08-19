@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="SongPedia - אנציקלופדיית מוזיקה חכמה לחיפוש אמנים ושירים" />
+  <title>SongPedia</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero">
+      <div class="brand-mark" aria-hidden="true">♫</div>
+      <h1>SongPedia</h1>
+      <p class="tagline">אנציקלופדיית המוזיקה החכמה שלך</p>
+
+      <form id="searchForm" class="search-box" role="search">
+        <label class="sr-only" for="searchInput">חפש אמן, להקה או שיר</label>
+        <input
+          id="searchInput"
+          name="query"
+          type="search"
+          placeholder="חפש אמן, להקה או שיר..."
+          autocomplete="off"
+          required
+        />
+        <button type="submit">חיפוש</button>
+      </form>
+
+      <p class="search-hint">אפשר לחפש בעברית או באנגלית</p>
+    </section>
+
+    <section id="status" class="status" aria-live="polite"></section>
+    <section id="results" class="results" aria-live="polite"></section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
