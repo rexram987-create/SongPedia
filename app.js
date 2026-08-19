@@ -5,6 +5,30 @@ const status = document.getElementById("status");
 
 const MUSICBRAINZ_BASE = "https://musicbrainz.org/ws/2";
 
+const MUSIC_KEYWORDS_HE = [
+  "שיר", "זמר", "זמרת", "להקה", "מוזיקה", "מוזיקלי", "אלבום", "סינגל",
+  "מלחין", "מלחינה", "פזמונאי", "פזמונאית", "מילים", "לחן", "ביצוע",
+  "הקלטה", "תקליט", "תקליטור", "הרכב", "מנצח", "זמר עברי"
+];
+
+const MUSIC_KEYWORDS_EN = [
+  "song", "singer", "band", "music", "musical", "album", "single", "composer",
+  "lyricist", "recording", "record", "vocalist", "musician", "discography",
+  "performer", "track", "orchestra"
+];
+
+const NON_MUSIC_KEYWORDS_HE = [
+  "צמח", "מין", "סוג", "משפחה", "בוטני", "בוטניקה", "בעל חיים", "עוף",
+  "יונק", "דג", "חרק", "יישוב", "עיר", "כפר", "נהר", "הר", "מחלה",
+  "תרופה", "כימיה", "פיזיקה", "מאכל"
+];
+
+const NON_MUSIC_KEYWORDS_EN = [
+  "plant", "species", "genus", "family", "botanical", "botany", "animal", "bird",
+  "mammal", "fish", "insect", "city", "village", "river", "mountain", "disease",
+  "medicine", "chemical", "physics", "food"
+];
+
 function escapeHtml(value = "") {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -16,6 +40,60 @@ function escapeHtml(value = "") {
 
 function containsHebrew(value) {
   return /[\u0590-\u05FF]/.test(value);
+}
+
+function normalizeText(value = "") {
+  return String(value).trim().toLocaleLowerCase("he");
+}
+
+function wordsOf(value = "") {
+  return normalizeText(value)
+    .replace(/[\u0591-\u05C7]/g, "")
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function calculateMusicRelevance(item, originalQuery) {
+  const query = normalizeText(originalQuery);
+  const title = normalizeText(item.title);
+  const text = normalizeText(`${item.title} ${item.description || ""}`);
+  const musicKeywords = item.lang === "he" ? MUSIC_KEYWORDS_HE : MUSIC_KEYWORDS_EN;
+  const nonMusicKeywords = item.lang === "he" ? NON_MUSIC_KEYWORDS_HE : NON_MUSIC_KEYWORDS_EN;
+
+  let score = 0;
+
+  if (title === query) score += 12;
+  if (title.includes(query)) score += 6;
+
+  const queryWords = wordsOf(query).filter((word) => word.length > 2);
+  for (const word of queryWords) {
+    if (title.includes(word)) score += 2;
+  }
+
+  for (const keyword of musicKeywords) {
+    if (text.includes(keyword)) score += 4;
+  }
+
+  for (const keyword of nonMusicKeywords) {
+    if (text.includes(keyword)) score -= 5;
+  }
+
+  return score;
+}
+
+function filterWikipediaResults(items, originalQuery) {
+  if (!items.length) return [];
+
+  const scored = items
+    .map((item) => ({ ...item, musicScore: calculateMusicRelevance(item, originalQuery) }))
+    .sort((a, b) => b.musicScore - a.musicScore);
+
+  const strong = scored.filter((item) => item.musicScore >= 4);
+  if (strong.length) return strong.slice(0, 6);
+
+  // If Wikipedia has no clearly musical match, prefer showing nothing over unrelated topics.
+  return [];
 }
 
 async function fetchJson(url) {
@@ -75,29 +153,44 @@ async function searchMusicBrainz(query) {
 async function searchWikipedia(query) {
   const primaryLanguage = containsHebrew(query) ? "he" : "en";
   const secondaryLanguage = primaryLanguage === "he" ? "en" : "he";
+  const musicQualifier = primaryLanguage === "he" ? "שיר מוזיקה" : "song music";
 
-  const first = await wikipediaSearchInLanguage(query, primaryLanguage);
-  if (first.length >= 4) return first;
+  // First try a music-focused search, then fall back to the raw query.
+  const focused = await wikipediaSearchInLanguage(`${query} ${musicQualifier}`, primaryLanguage, 10);
+  let combined = [...focused];
 
-  const second = await wikipediaSearchInLanguage(query, secondaryLanguage);
-  const seen = new Set(first.map((item) => `${item.lang}:${item.pageid}`));
-  return [...first, ...second.filter((item) => !seen.has(`${item.lang}:${item.pageid}`))].slice(0, 6);
+  if (combined.length < 6) {
+    const rawPrimary = await wikipediaSearchInLanguage(query, primaryLanguage, 10);
+    combined = mergeWikipediaResults(combined, rawPrimary);
+  }
+
+  if (combined.length < 6) {
+    const focusedSecondary = await wikipediaSearchInLanguage(`${query} ${secondaryLanguage === "he" ? "שיר מוזיקה" : "song music"}`, secondaryLanguage, 8);
+    combined = mergeWikipediaResults(combined, focusedSecondary);
+  }
+
+  return filterWikipediaResults(combined, query);
 }
 
-async function wikipediaSearchInLanguage(query, lang) {
+function mergeWikipediaResults(first, second) {
+  const seen = new Set(first.map((item) => `${item.lang}:${item.pageid}`));
+  return [...first, ...second.filter((item) => !seen.has(`${item.lang}:${item.pageid}`))];
+}
+
+async function wikipediaSearchInLanguage(query, lang, limit = 6) {
   const api = `https://${lang}.wikipedia.org/w/api.php`;
   const params = new URLSearchParams({
     action: "query",
     generator: "search",
     gsrsearch: query,
-    gsrlimit: "6",
+    gsrlimit: String(limit),
     prop: "pageimages|extracts|info",
     inprop: "url",
     piprop: "thumbnail",
     pithumbsize: "240",
     exintro: "1",
     explaintext: "1",
-    exsentences: "2",
+    exsentences: "3",
     origin: "*",
     format: "json"
   });
@@ -146,13 +239,13 @@ function renderResults({ artists = [], songs = [], wikipedia = [] }) {
   results.innerHTML = [
     renderSection("אמנים", artists),
     renderSection("שירים והקלטות", songs),
-    renderSection("מידע מוויקיפדיה", wikipedia)
+    renderSection("מידע מוזיקלי מוויקיפדיה", wikipedia)
   ].join("");
 
   if (!artists.length && !songs.length && !wikipedia.length) {
     results.innerHTML = `
       <div class="empty-state">
-        לא נמצאו תוצאות. נסה איות אחר או חיפוש בעברית/באנגלית.
+        לא נמצאו תוצאות מוזיקליות מתאימות. נסה איות אחר או חיפוש בעברית/באנגלית.
       </div>
     `;
   }
@@ -189,7 +282,7 @@ searchForm.addEventListener("submit", async (event) => {
 
     status.textContent = failures.length
       ? `החיפוש הושלם, אך לא הצלחנו לקבל כרגע מידע מ־${failures.join(" ו־")}.`
-      : `נמצאו תוצאות עבור “${query}”.`;
+      : `נמצאו תוצאות מוזיקליות עבור “${query}”.`;
   } catch (error) {
     console.error(error);
     status.textContent = "אירעה שגיאה בחיפוש. נסה שוב בעוד רגע.";
@@ -199,6 +292,6 @@ searchForm.addEventListener("submit", async (event) => {
 
 results.innerHTML = `
   <div class="empty-state">
-    חפש אמן, להקה או שיר כדי לקבל תוצאות אמיתיות מ־MusicBrainz ומ־Wikipedia.
+    חפש אמן, להקה או שיר כדי לקבל תוצאות מוזיקליות מ־MusicBrainz ומ־Wikipedia.
   </div>
 `;
