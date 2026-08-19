@@ -16,7 +16,8 @@ function songpediaRecordingRank(recording, query) {
   const apiScore = Number(recording.score || 0);
   const releaseBonus = Math.min(songpediaReleaseCount(recording) * 2, 40);
   const exactBonus = normalizeText(recording.title || "") === normalizeText(query) ? 60 : 0;
-  return titleScore * 2 + apiScore + releaseBonus + exactBonus;
+  const preferredBonus = recording.__preferredPerformer ? 250 : 0;
+  return titleScore * 2 + apiScore + releaseBonus + exactBonus + preferredBonus;
 }
 
 function songpediaUniqueById(items) {
@@ -124,7 +125,7 @@ async function songpediaGetWikidataPerformers(wikidataId, language = "en") {
   const labelsParams = new URLSearchParams({
     action: "wbgetentities",
     ids: performerIds.join("|"),
-    props: "labels|sitelinks",
+    props: "labels|sitelinks|claims",
     languages: `${language}|en|he`,
     origin: "*",
     format: "json"
@@ -141,9 +142,12 @@ async function songpediaGetWikidataPerformers(wikidataId, language = "en") {
     const url = wikiTitle
       ? `https://${wikiLang}.wikipedia.org/wiki/${encodeURIComponent(wikiTitle.replaceAll(" ", "_"))}`
       : `https://www.wikidata.org/wiki/${id}`;
+    const musicBrainzId = performer.claims?.P434?.[0]?.mainsnak?.datavalue?.value || "";
 
     return {
       id: `wikidata-${id}`,
+      wikidataId: id,
+      musicBrainzId,
       type: "אמן",
       title: label,
       subtitle: "מבצע לפי Wikidata",
@@ -177,6 +181,36 @@ async function songpediaFindWikidataPerformers(query) {
   return [];
 }
 
+async function songpediaFindPreferredRecordings(query, performers) {
+  const searches = performers.slice(0, 4).map(async (performer) => {
+    const escapedTitle = query.replaceAll('"', '\\"');
+    let mbQuery;
+
+    if (performer.musicBrainzId) {
+      mbQuery = `recording:"${escapedTitle}" AND arid:${performer.musicBrainzId}`;
+    } else {
+      const escapedArtist = performer.title.replaceAll('"', '\\"');
+      mbQuery = `recording:"${escapedTitle}" AND artist:"${escapedArtist}"`;
+    }
+
+    try {
+      const data = await fetchJson(`${MUSICBRAINZ_BASE}/recording/?query=${encodeURIComponent(mbQuery)}&fmt=json&limit=12`);
+      return (data.recordings || [])
+        .filter((recording) => textSimilarityScore(recording.title || "", query) >= 82)
+        .map((recording) => ({
+          ...recording,
+          __query: query,
+          __preferredPerformer: performer.title
+        }));
+    } catch (error) {
+      console.warn("Could not load preferred performer recordings", performer.title, error);
+      return [];
+    }
+  });
+
+  return (await Promise.all(searches)).flat();
+}
+
 const songpediaOriginalSearchMusicBrainz = searchMusicBrainz;
 
 searchMusicBrainz = async function improvedSearchMusicBrainz(query) {
@@ -189,6 +223,8 @@ searchMusicBrainz = async function improvedSearchMusicBrainz(query) {
     fetchJson(`${MUSICBRAINZ_BASE}/recording/?query=${recordingQuery}&fmt=json&limit=100`),
     songpediaFindWikidataPerformers(query).catch(() => [])
   ]);
+
+  const preferredRecordings = await songpediaFindPreferredRecordings(query, wikidataPerformersResult);
 
   const directArtists = (artistsData.artists || [])
     .map((artist) => ({
@@ -205,15 +241,15 @@ searchMusicBrainz = async function improvedSearchMusicBrainz(query) {
     .sort((a, b) => b.relevance - a.relevance)
     .slice(0, 6);
 
-  const rawRecordings = (recordingsData.recordings || [])
+  const generalRecordings = (recordingsData.recordings || [])
     .map((recording) => ({ ...recording, __query: query }))
-    .filter((recording) => textSimilarityScore(recording.title || "", query) >= 82)
+    .filter((recording) => textSimilarityScore(recording.title || "", query) >= 82);
+
+  const rawRecordings = songpediaUniqueById([...preferredRecordings, ...generalRecordings])
     .sort((a, b) => songpediaRecordingRank(b, query) - songpediaRecordingRank(a, query));
 
   const prominentPerformers = songpediaPerformerArtists(rawRecordings.slice(0, 50));
 
-  // Wikidata performers get priority because they are attached to the song/creative work,
-  // while MusicBrainz search order can omit a famous recording for very common titles.
   const artists = songpediaUniqueById([
     ...wikidataPerformersResult,
     ...directArtists,
@@ -233,10 +269,10 @@ searchMusicBrainz = async function improvedSearchMusicBrainz(query) {
       id: recording.id,
       type: "שיר",
       title: recording.title,
-      subtitle: [performers, year].filter(Boolean).join(" · "),
+      subtitle: [performers || recording.__preferredPerformer, year].filter(Boolean).join(" · "),
       description: album
         ? `אלבום/מהדורה: ${album}`
-        : `הקלטה של ${performers || "מבצע לא ידוע"}`,
+        : `הקלטה של ${performers || recording.__preferredPerformer || "מבצע לא ידוע"}`,
       source: "MusicBrainz",
       url: `https://musicbrainz.org/recording/${recording.id}`,
       relevance: songpediaRecordingRank(recording, query)
