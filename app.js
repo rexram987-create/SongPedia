@@ -43,15 +43,35 @@ function containsHebrew(value) {
 }
 
 function normalizeText(value = "") {
-  return String(value).trim().toLocaleLowerCase("he");
+  return String(value)
+    .normalize("NFKD")
+    .replace(/[\u0591-\u05C7]/g, "")
+    .trim()
+    .toLocaleLowerCase("he");
 }
 
 function wordsOf(value = "") {
   return normalizeText(value)
-    .replace(/[\u0591-\u05C7]/g, "")
     .replace(/[^\p{L}\p{N}\s-]/gu, " ")
     .split(/\s+/)
     .filter(Boolean);
+}
+
+function textSimilarityScore(candidate, query) {
+  const a = normalizeText(candidate);
+  const b = normalizeText(query);
+
+  if (!a || !b) return 0;
+  if (a === b) return 100;
+  if (a.startsWith(b) || b.startsWith(a)) return 82;
+  if (a.includes(b) || b.includes(a)) return 72;
+
+  const aWords = new Set(wordsOf(a));
+  const bWords = wordsOf(b);
+  if (!bWords.length) return 0;
+
+  const matches = bWords.filter((word) => aWords.has(word)).length;
+  return Math.round((matches / bWords.length) * 60);
 }
 
 function calculateMusicRelevance(item, originalQuery) {
@@ -92,7 +112,6 @@ function filterWikipediaResults(items, originalQuery) {
   const strong = scored.filter((item) => item.musicScore >= 4);
   if (strong.length) return strong.slice(0, 6);
 
-  // If Wikipedia has no clearly musical match, prefer showing nothing over unrelated topics.
   return [];
 }
 
@@ -109,43 +128,55 @@ async function fetchJson(url) {
 }
 
 async function searchMusicBrainz(query) {
-  const encoded = encodeURIComponent(query);
+  const escapedQuery = query.replaceAll('"', '\\"');
+  const artistQuery = encodeURIComponent(`artist:"${escapedQuery}"`);
+  const recordingQuery = encodeURIComponent(`recording:"${escapedQuery}"`);
 
   const [artistsData, recordingsData] = await Promise.all([
-    fetchJson(`${MUSICBRAINZ_BASE}/artist/?query=${encoded}&fmt=json&limit=6`),
-    fetchJson(`${MUSICBRAINZ_BASE}/recording/?query=${encoded}&fmt=json&limit=8`)
+    fetchJson(`${MUSICBRAINZ_BASE}/artist/?query=${artistQuery}&fmt=json&limit=12`),
+    fetchJson(`${MUSICBRAINZ_BASE}/recording/?query=${recordingQuery}&fmt=json&limit=16`)
   ]);
 
-  const artists = (artistsData.artists || []).map((artist) => ({
-    id: artist.id,
-    type: "אמן",
-    title: artist.name,
-    subtitle: [artist.type, artist.country, artist["life-span"]?.begin].filter(Boolean).join(" · "),
-    description: artist.disambiguation || "תוצאת אמן מתוך MusicBrainz",
-    source: "MusicBrainz",
-    url: `https://musicbrainz.org/artist/${artist.id}`
-  }));
-
-  const songs = (recordingsData.recordings || []).map((recording) => {
-    const performers = (recording["artist-credit"] || [])
-      .map((credit) => credit.name || credit.artist?.name)
-      .filter(Boolean)
-      .join(", ");
-
-    const firstRelease = recording.releases?.[0];
-    const album = firstRelease?.title;
-    const year = recording["first-release-date"]?.slice(0, 4);
-
-    return {
-      id: recording.id,
-      type: "שיר",
-      title: recording.title,
-      subtitle: [performers, year].filter(Boolean).join(" · "),
-      description: album ? `אלבום/מהדורה: ${album}` : "תוצאת הקלטה מתוך MusicBrainz",
+  const artists = (artistsData.artists || [])
+    .map((artist) => ({
+      id: artist.id,
+      type: "אמן",
+      title: artist.name,
+      subtitle: [artist.type, artist.country, artist["life-span"]?.begin].filter(Boolean).join(" · "),
+      description: artist.disambiguation || "תוצאת אמן מתוך MusicBrainz",
       source: "MusicBrainz",
-      url: `https://musicbrainz.org/recording/${recording.id}`
-    };
-  });
+      url: `https://musicbrainz.org/artist/${artist.id}`,
+      relevance: Math.max(textSimilarityScore(artist.name, query), Number(artist.score || 0))
+    }))
+    .filter((artist) => artist.relevance >= 68)
+    .sort((a, b) => b.relevance - a.relevance)
+    .slice(0, 6);
+
+  const songs = (recordingsData.recordings || [])
+    .map((recording) => {
+      const performers = (recording["artist-credit"] || [])
+        .map((credit) => credit.name || credit.artist?.name)
+        .filter(Boolean)
+        .join(", ");
+
+      const firstRelease = recording.releases?.[0];
+      const album = firstRelease?.title;
+      const year = recording["first-release-date"]?.slice(0, 4);
+
+      return {
+        id: recording.id,
+        type: "שיר",
+        title: recording.title,
+        subtitle: [performers, year].filter(Boolean).join(" · "),
+        description: album ? `אלבום/מהדורה: ${album}` : "תוצאת הקלטה מתוך MusicBrainz",
+        source: "MusicBrainz",
+        url: `https://musicbrainz.org/recording/${recording.id}`,
+        relevance: Math.max(textSimilarityScore(recording.title, query), Number(recording.score || 0))
+      };
+    })
+    .filter((song) => song.relevance >= 68)
+    .sort((a, b) => b.relevance - a.relevance)
+    .slice(0, 8);
 
   return { artists, songs };
 }
@@ -155,7 +186,6 @@ async function searchWikipedia(query) {
   const secondaryLanguage = primaryLanguage === "he" ? "en" : "he";
   const musicQualifier = primaryLanguage === "he" ? "שיר מוזיקה" : "song music";
 
-  // First try a music-focused search, then fall back to the raw query.
   const focused = await wikipediaSearchInLanguage(`${query} ${musicQualifier}`, primaryLanguage, 10);
   let combined = [...focused];
 
