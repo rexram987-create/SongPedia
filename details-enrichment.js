@@ -47,7 +47,7 @@ async function songpediaWikidataSearchEntities(query, language) {
     language,
     uselang: language,
     type: "item",
-    limit: "8",
+    limit: "10",
     origin: "*",
     format: "json"
   });
@@ -70,15 +70,87 @@ async function songpediaGetWikidataEntity(id) {
 
 function songpediaEntityHasMusicCredits(entity) {
   return Boolean(
-    entity?.claims?.P175?.length || // performer
-    entity?.claims?.P86?.length ||  // composer
-    entity?.claims?.P676?.length || // lyrics by
-    entity?.claims?.P50?.length     // author
+    entity?.claims?.P175?.length ||
+    entity?.claims?.P86?.length ||
+    entity?.claims?.P676?.length ||
+    entity?.claims?.P50?.length ||
+    entity?.claims?.P577?.length
   );
 }
 
-async function songpediaFindWikidataSongEntity(title, performers = []) {
-  const language = containsHebrew(title) ? "he" : "en";
+async function songpediaPerformerMatchScore(entity, performers, language) {
+  if (!performers?.length) return 0;
+  const performerIds = songpediaClaimEntityIds(entity, "P175");
+  if (!performerIds.length) return 0;
+  const labels = await songpediaLabelsForIds(performerIds, language);
+  const performerLabels = Object.values(labels);
+
+  let best = 0;
+  for (const expected of performers) {
+    for (const actual of performerLabels) {
+      best = Math.max(best, textSimilarityScore(actual, expected));
+    }
+  }
+  return best;
+}
+
+async function songpediaFindViaWikipedia(title, performers, language) {
+  if (typeof songpediaWikipediaSearchWithWikidata !== "function") return null;
+
+  const languages = language === "he" ? ["he", "en"] : ["en", "he"];
+  const qualifiers = language === "he" ? ["שיר", "מוזיקה"] : ["song", "single"];
+  const pages = [];
+  const seen = new Set();
+
+  for (const lang of languages) {
+    for (const qualifier of qualifiers) {
+      try {
+        const found = await songpediaWikipediaSearchWithWikidata(`${title} ${qualifier}`, lang);
+        for (const page of found) {
+          if (!page.wikidataId || seen.has(page.wikidataId)) continue;
+          seen.add(page.wikidataId);
+          pages.push(page);
+        }
+      } catch (error) {
+        console.warn("Wikipedia/Wikidata lookup failed", title, lang, error);
+      }
+    }
+  }
+
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (const page of pages.slice(0, 16)) {
+    try {
+      const entity = await songpediaGetWikidataEntity(page.wikidataId);
+      if (!entity || !songpediaEntityHasMusicCredits(entity)) continue;
+
+      const label = entity.labels?.[language]?.value || entity.labels?.he?.value || entity.labels?.en?.value || page.title || "";
+      let score = textSimilarityScore(label, title) * 2;
+      if (normalizeText(label) === normalizeText(title)) score += 100;
+      if (normalizeText(page.title || "").includes(normalizeText(title))) score += 40;
+
+      const performerScore = await songpediaPerformerMatchScore(entity, performers, language);
+      if (performerScore >= 72) score += 140;
+      else if (performerScore >= 50) score += 60;
+
+      if (entity.claims?.P86?.length) score += 20;
+      if (entity.claims?.P676?.length || entity.claims?.P50?.length) score += 20;
+      if (entity.claims?.P577?.length) score += 10;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = entity;
+      }
+    } catch (error) {
+      console.warn("Could not inspect Wikipedia-linked Wikidata item", page.wikidataId, error);
+    }
+  }
+
+  return bestScore >= 150 ? best : null;
+}
+
+async function songpediaFindViaEntitySearch(title, performers, language) {
   const performer = performers?.[0] || "";
   const queries = [
     performer ? `${title} ${performer}` : title,
@@ -105,24 +177,22 @@ async function songpediaFindWikidataSongEntity(title, performers = []) {
   let best = null;
   let bestScore = -Infinity;
 
-  for (const candidate of candidates.slice(0, 12)) {
+  for (const candidate of candidates.slice(0, 16)) {
     try {
       const entity = await songpediaGetWikidataEntity(candidate.id);
       if (!entity || !songpediaEntityHasMusicCredits(entity)) continue;
 
       const label = entity.labels?.[language]?.value || entity.labels?.he?.value || entity.labels?.en?.value || candidate.label || "";
       let score = textSimilarityScore(label, title) * 2;
-      if (normalizeText(label) === normalizeText(title)) score += 80;
+      if (normalizeText(label) === normalizeText(title)) score += 100;
 
-      if (performer) {
-        const performerIds = songpediaClaimEntityIds(entity, "P175");
-        const labels = await songpediaLabelsForIds(performerIds, language);
-        const performerLabels = Object.values(labels);
-        if (performerLabels.some((name) => textSimilarityScore(name, performer) >= 72)) score += 100;
-      }
+      const performerScore = await songpediaPerformerMatchScore(entity, performers, language);
+      if (performerScore >= 72) score += 140;
+      else if (performerScore >= 50) score += 60;
 
       if (entity.claims?.P86?.length) score += 20;
       if (entity.claims?.P676?.length || entity.claims?.P50?.length) score += 20;
+      if (entity.claims?.P577?.length) score += 10;
 
       if (score > bestScore) {
         bestScore = score;
@@ -134,6 +204,15 @@ async function songpediaFindWikidataSongEntity(title, performers = []) {
   }
 
   return bestScore >= 150 ? best : null;
+}
+
+async function songpediaFindWikidataSongEntity(title, performers = []) {
+  const language = containsHebrew(title) ? "he" : "en";
+
+  const fromWikipedia = await songpediaFindViaWikipedia(title, performers, language);
+  if (fromWikipedia) return fromWikipedia;
+
+  return songpediaFindViaEntitySearch(title, performers, language);
 }
 
 async function songpediaWikidataCredits(title, performers) {
@@ -191,6 +270,7 @@ fetchSongDetails = async function enrichedFetchSongDetails(recordingId) {
     writers: songpediaPrefer(base.writers, wikidata.writers),
     releaseYear: base.releaseYear && base.releaseYear !== "לא נמצא" ? base.releaseYear : (wikidata.releaseYear || "לא נמצא"),
     wikidataUrl: wikidata.sourceUrl,
+    wikidataId: wikidata.id,
     sources: ["MusicBrainz", "Wikidata"]
   };
 };
@@ -205,8 +285,8 @@ renderSongDetails = function enrichedRenderSongDetails(details) {
   const note = panel.querySelector(".details-note");
   if (note) {
     note.textContent = details.sources?.includes("Wikidata")
-      ? "הכרטיס משלב מידע מ־MusicBrainz ומ־Wikidata. כאשר מקור אחד חסר פרט, SongPedia מנסה להשלים אותו מהמקור השני; מידע שלא נמצא נשאר מסומן כחסר."
-      : "המידע הזמין לכרטיס זה הגיע מ־MusicBrainz. פרטים שלא נמצאו במקור אינם מוצגים כניחוש.";
+      ? "הכרטיס משלב מידע מ־MusicBrainz ומ־Wikidata. SongPedia מאמת את ערך השיר דרך Wikipedia/Wikidata ומנסה להשלים פרטים חסרים מהמקור השני."
+      : "המידע הזמין לכרטיס זה הגיע מ־MusicBrainz בלבד. לא נמצא ערך Wikidata מתאים ברמת ודאות מספקת, ולכן SongPedia לא הוסיף מקור שעלול להיות שגוי.";
   }
 
   if (details.wikidataUrl) {
@@ -215,7 +295,7 @@ renderSongDetails = function enrichedRenderSongDetails(details) {
     link.href = details.wikidataUrl;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.textContent = "מקור נוסף: Wikidata / Wikipedia";
+    link.textContent = `מקור נוסף: Wikidata${details.wikidataId ? ` (${details.wikidataId})` : ""}`;
     link.style.marginInlineStart = "14px";
     panel.appendChild(link);
   }
